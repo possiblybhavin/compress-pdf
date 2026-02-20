@@ -4,7 +4,7 @@ A Python tool that compresses scanned-document PDFs using the same techniques as
 
 ## How It Works
 
-The tool analyzes each image embedded in a PDF and applies up to five compression techniques:
+The tool analyzes each image embedded in a PDF and applies up to seven compression techniques:
 
 ### 1. Image Downsampling (biggest impact)
 
@@ -16,28 +16,38 @@ This single technique is responsible for ~90% of the file size savings on typica
 
 Downsampled images are re-encoded as optimized JPEGs at a configurable quality level (default 75). Images that don't need downsampling keep their original JPEG data untouched to avoid generation loss.
 
-### 3. FlateDecode Wrapping
+### 3. MozJPEG Lossless Optimization
 
-JPEG streams are wrapped in an additional zlib/Flate compression layer (chained PDF filter `[/FlateDecode, /DCTDecode]`). JPEG headers and low-entropy regions compress well under Flate, saving an additional 3-10% per image. This is applied to both re-encoded and preserved original JPEGs.
+All JPEG streams (both re-encoded and preserved originals) are passed through MozJPEG's lossless optimizer, which improves Huffman coding tables and converts to progressive scan order. This provides 7-21% savings per image with zero quality loss. The optimization is applied after downsampling/re-encoding, so even Pillow-encoded JPEGs benefit.
 
-### 4. ICC Profile Stripping
+### 4. FlateDecode Wrapping
+
+JPEG streams are wrapped in an additional zlib/Flate compression layer (chained PDF filter `[/FlateDecode, /DCTDecode]`). JPEG headers and low-entropy regions compress well under Flate, saving an additional 1-5% per image.
+
+### 5. ICC Profile Stripping
 
 Embedded ICC color profiles (often 2-3 KB each) are replaced with simple `/DeviceRGB` or `/DeviceGray` color space references.
 
-### 5. PDF Object Optimization
+### 6. Flate Stream Re-compression
 
-Unreferenced objects are removed and Flate-compressed streams are re-compressed with maximum zlib settings.
+Non-JPEG images (PNG-style Flate-encoded) are re-compressed with maximum zlib settings (level 9), saving 30-60% on images originally compressed with weaker settings.
+
+### 7. PDF Object Optimization
+
+Unreferenced objects are removed and all compressed streams are re-compressed during the final save pass.
 
 ## Installation
 
 ```bash
-pip install pikepdf Pillow
+pip install pikepdf Pillow mozjpeg-lossless-optimization
 ```
+
+MozJPEG is optional but recommended. The tool will work without it (with slightly larger output) and print a warning if it's not installed.
 
 ## Usage
 
 ```bash
-python compress_pdf.py input.pdf output.pdf [--dpi 150] [--quality 75]
+python compress_pdf.py input.pdf output.pdf [--dpi 150] [--quality 75] [--no-mozjpeg]
 ```
 
 ### Options
@@ -46,6 +56,7 @@ python compress_pdf.py input.pdf output.pdf [--dpi 150] [--quality 75]
 |--------|---------|-------------|
 | `--dpi` | 150 | Target DPI for image downsampling. Images above this DPI (with 10% tolerance) are downsampled. 150 DPI is sufficient for readable document scans. Use 200-300 for documents where fine detail matters. |
 | `--quality` | 75 | JPEG quality (1-100) for re-encoded images. Only affects images that are downsampled; images already at or below the target DPI keep their original JPEG data. |
+| `--no-mozjpeg` | off | Disable MozJPEG lossless optimization. Reduces processing time by ~250ms at the cost of ~38 KB larger output. |
 
 ### Examples
 
@@ -58,20 +69,82 @@ python compress_pdf.py scan.pdf scan_small.pdf --dpi 120 --quality 65
 
 # High quality — for documents where fine print matters
 python compress_pdf.py scan.pdf scan_hq.pdf --dpi 200 --quality 85
+
+# Fast mode — skip mozjpeg for quicker processing
+python compress_pdf.py scan.pdf scan_fast.pdf --no-mozjpeg
 ```
 
-## Results
+## Profiling Output
+
+The tool prints a per-stage compression profile showing exactly where savings come from:
+
+```
+======================================================================
+  COMPRESSION PROFILE BY STAGE
+======================================================================
+
+  1_downsample:
+    Applied to: 1 image(s)
+    Total before: 6,464,787 bytes
+    Total after:  254,985 bytes
+    Saved:        6,209,802 bytes (96.1%)
+    Time:         449.5 ms
+
+  2_mozjpeg:
+    Applied to: 6 image(s)
+    Total before: 742,260 bytes
+    Total after:  683,014 bytes
+    Saved:        59,246 bytes (8.0%)
+    Time:         257.1 ms
+
+  3_flate_wrap:
+    Applied to: 5 image(s)
+    Total before: 436,276 bytes
+    Total after:  431,190 bytes
+    Saved:        5,086 bytes (1.2%)
+    Time:         10.8 ms
+
+  4_flate_recompress:
+    Applied to: 6 image(s)
+    Total before: 33,011 bytes
+    Total after:  22,178 bytes
+    Saved:        10,833 bytes (32.8%)
+    Time:         52.9 ms
+```
+
+And a per-image summary:
+
+```
+======================================================================
+  PER-IMAGE SUMMARY
+======================================================================
+  Page   Name       Dims             Original      Final    Saved Stages
+  ------ ---------- -------------- ---------- ---------- -------- ----------------------
+  1      /Im1       826x1148           87,120     79,195     9.1% mozjpeg, flate_wrap
+  3      /Im3       838x1099           70,118     57,800    17.6% mozjpeg, flate_wrap
+  5      /Im1       5712x4284       6,464,787    246,738    96.2% downsample, mozjpeg
+  9      /Im6       850x1050           62,380     47,052    24.6% mozjpeg, flate_wrap
+```
+
+## Benchmark Results
 
 Tested on a 15-page PDF containing passport scans, certificates, and shipping labels (7.2 MB original, 883 KB from smallpdf.com):
 
-| Settings | Output Size | Reduction |
-|----------|-------------|-----------|
-| `--dpi 150 --quality 75` | 1,027 KB | 86.0% |
-| `--dpi 130 --quality 70` | 953 KB | 87.0% |
-| `--dpi 120 --quality 65` | 915 KB | 87.6% |
-| smallpdf.com | 883 KB | 88.3% |
+| Configuration | Output Size | Reduction | Time |
+|---------------|-------------|-----------|------|
+| `--dpi 150 --quality 75` (with mozjpeg) | **989 KB** | **86.5%** | 1.3s |
+| `--dpi 150 --quality 75 --no-mozjpeg` | 1,027 KB | 86.0% | 1.0s |
+| `--dpi 120 --quality 65` (with mozjpeg) | ~880 KB | ~88.3% | 1.2s |
+| smallpdf.com | 883 KB | 88.3% | — |
 
-The remaining ~30 KB gap versus smallpdf is attributable to their use of a more advanced JPEG encoder (likely MozJPEG or jpegli). See "Further Optimization" below.
+### MozJPEG Impact
+
+| Metric | Without | With | Delta |
+|--------|---------|------|-------|
+| Output size | 1,027 KB | 989 KB | **-38 KB** |
+| Processing time | 960 ms | 1,272 ms | +312 ms |
+
+MozJPEG's biggest wins were on images with suboptimal original Huffman tables: page 9 saw a 20.8% lossless reduction, and page 3 saw 16.1%.
 
 ## Analysis Scripts
 
@@ -89,28 +162,15 @@ Both scripts have hardcoded file paths that you'll need to update for your files
 
 ## Further Optimization
 
-To close the remaining gap with commercial tools, consider integrating one or both of these:
-
-### mozjpeg-lossless-optimization
-
-A Python library that losslessly optimizes existing JPEG streams by improving Huffman tables and converting to progressive scan order. Zero quality loss, 2-10% size reduction. Best for images where you're preserving the original JPEG data (not downsampling).
-
-```bash
-pip install mozjpeg-lossless-optimization
-```
-
-```python
-import mozjpeg_lossless_optimization
-optimized = mozjpeg_lossless_optimization.optimize(jpeg_bytes)
-```
+The remaining ~100 KB gap versus smallpdf at default settings (or ~0 KB at `--dpi 120 --quality 65`) comes primarily from the JPEG encoder used for downsampled images. Pillow uses standard libjpeg, which produces larger files than more advanced encoders at equivalent visual quality.
 
 ### jpegli (Google)
 
-A full JPEG encoder that uses perceptually-optimized adaptive quantization, floating-point precision throughout the pipeline, and content-aware dead-zone quantization. Produces significantly smaller JPEGs at equivalent visual quality compared to Pillow/libjpeg. Best for images you're re-encoding from pixels (downsampled images).
+A full JPEG encoder from Google (originally part of the JPEG XL project) that uses perceptually-optimized adaptive quantization, floating-point precision throughout the pipeline, and content-aware dead-zone quantization. Produces significantly smaller JPEGs at equivalent visual quality compared to Pillow/libjpeg. Best for images you're re-encoding from pixels (downsampled images).
 
 Requires building from source: https://github.com/google/jpegli
 
-The two approaches are complementary: use jpegli for encoding from raw pixels, and mozjpeg-lossless-optimization as a final pass on preserved JPEGs.
+jpegli and mozjpeg-lossless-optimization are complementary: use jpegli for encoding from raw pixels, and mozjpeg as a final lossless optimization pass.
 
 ## How the Techniques Were Discovered
 
@@ -125,4 +185,5 @@ The compression techniques were reverse-engineered by comparing the internal str
 
 - **pikepdf** — PDF manipulation (reading/writing streams, object replacement)
 - **Pillow** — Image decoding, resizing, and JPEG encoding
+- **mozjpeg-lossless-optimization** — Lossless JPEG optimization (optional, recommended)
 - **Python 3.8+**
