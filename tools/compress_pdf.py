@@ -34,6 +34,80 @@ try:
 except ImportError:
     HAS_MOZJPEG = False
 
+# Detect cjpegli binary
+import shutil
+import subprocess
+import tempfile
+
+def _find_cjpegli():
+    """Find cjpegli binary, checking PATH and common install locations."""
+    # Check PATH first
+    path = shutil.which('cjpegli')
+    if path:
+        return path
+    # Check common install locations (macOS, Linux)
+    for candidate in [
+        '/usr/local/bin/cjpegli',
+        '/opt/homebrew/bin/cjpegli',
+        os.path.expanduser('~/bin/cjpegli'),
+        os.path.expanduser('~/.local/bin/cjpegli'),
+    ]:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+CJPEGLI_PATH = _find_cjpegli()
+HAS_JPEGLI = CJPEGLI_PATH is not None
+
+
+def encode_with_jpegli(img, quality=75):
+    """
+    Encode a PIL Image to JPEG using cjpegli.
+    Returns JPEG bytes on success, None on failure.
+    """
+    if not HAS_JPEGLI:
+        return None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        png_path = os.path.join(tmpdir, 'input.png')
+        jpg_path = os.path.join(tmpdir, 'output.jpg')
+
+        # Save as PNG for cjpegli input
+        img.save(png_path, format='PNG')
+
+        # Build environment with library path for macOS dylib resolution
+        env = os.environ.copy()
+        cjpegli_lib_dir = os.path.dirname(os.path.dirname(CJPEGLI_PATH)) + '/lib'
+        if sys.platform == 'darwin':
+            existing = env.get('DYLD_LIBRARY_PATH', '')
+            env['DYLD_LIBRARY_PATH'] = f"{cjpegli_lib_dir}:{existing}" if existing else cjpegli_lib_dir
+        else:
+            existing = env.get('LD_LIBRARY_PATH', '')
+            env['LD_LIBRARY_PATH'] = f"{cjpegli_lib_dir}:{existing}" if existing else cjpegli_lib_dir
+
+        # Run cjpegli
+        try:
+            result = subprocess.run(
+                [CJPEGLI_PATH, png_path, jpg_path,
+                 f'--quality={quality}'],
+                capture_output=True, timeout=30, env=env
+            )
+        except Exception as e:
+            print(f"      jpegli:    subprocess error: {e}")
+            return None
+
+        if result.returncode != 0:
+            stderr = result.stderr.decode('utf-8', errors='replace').strip()
+            print(f"      jpegli:    cjpegli failed (rc={result.returncode}): {stderr}")
+            return None
+
+        if not os.path.exists(jpg_path):
+            print(f"      jpegli:    output file not created")
+            return None
+
+        with open(jpg_path, 'rb') as f:
+            return f.read()
+
 
 class CompressionStats:
     """Track per-stage compression statistics."""
@@ -110,7 +184,8 @@ def extract_jpeg_data(stream_obj):
 
 
 def compress_image(stream_obj, target_dpi=150, jpeg_quality=75,
-                   page_mediabox=None, use_mozjpeg=True, stats=None):
+                   page_mediabox=None, use_mozjpeg=True, use_jpegli=True,
+                   stats=None):
     """
     Compress a single PDF image XObject.
     Returns result dict with compressed data, or None if no improvement.
@@ -153,20 +228,32 @@ def compress_image(stream_obj, target_dpi=150, jpeg_quality=75,
             print(f"      Resampled: {width}x{height} -> {new_w}x{new_h} "
                   f"(DPI: {current_dpi:.0f} -> ~{target_dpi})")
 
-            buf = io.BytesIO()
             if img.mode not in ('RGB', 'L'):
                 img = img.convert('RGB')
-            img.save(buf, format='JPEG', quality=jpeg_quality, optimize=True,
-                     subsampling='4:2:0')
-            jpeg_bytes = buf.getvalue()
             color_mode = img.mode
+
+            # Try jpegli first, fall back to Pillow
+            encoder_used = 'pillow'
+            if use_jpegli and HAS_JPEGLI:
+                jpegli_bytes = encode_with_jpegli(img, jpeg_quality)
+                if jpegli_bytes:
+                    jpeg_bytes = jpegli_bytes
+                    encoder_used = 'jpegli'
+
+            if encoder_used != 'jpegli':
+                buf = io.BytesIO()
+                img.save(buf, format='JPEG', quality=jpeg_quality, optimize=True,
+                         subsampling='4:2:0')
+                jpeg_bytes = buf.getvalue()
+
             elapsed = (time.perf_counter() - t0) * 1000
 
             if stats:
                 stats.record('1_downsample', len(jpeg_data), len(jpeg_bytes), elapsed)
-            print(f"      Downsample+encode: {len(jpeg_data):,} -> {len(jpeg_bytes):,} bytes "
+            print(f"      Downsample+encode ({encoder_used}): "
+                  f"{len(jpeg_data):,} -> {len(jpeg_bytes):,} bytes "
                   f"[{elapsed:.0f}ms]")
-            stages_applied.append('downsample')
+            stages_applied.append(f'downsample({encoder_used})')
 
         else:
             # No resampling -- keep original JPEG data
@@ -261,7 +348,7 @@ def compress_image(stream_obj, target_dpi=150, jpeg_quality=75,
 
 
 def compress_pdf(input_path, output_path, target_dpi=150, jpeg_quality=75,
-                 use_mozjpeg=True):
+                 use_mozjpeg=True, use_jpegli=True):
     """
     Compress a PDF containing scanned document images.
 
@@ -271,17 +358,23 @@ def compress_pdf(input_path, output_path, target_dpi=150, jpeg_quality=75,
         target_dpi: Target DPI for image downsampling (default: 150)
         jpeg_quality: JPEG quality 1-100 (default: 75)
         use_mozjpeg: Use mozjpeg lossless optimization (default: True)
+        use_jpegli: Use jpegli for JPEG encoding (default: True)
     """
     total_start = time.perf_counter()
     pdf = pikepdf.open(input_path)
 
     input_size = os.path.getsize(input_path)
+    mozjpeg_status = 'enabled' if use_mozjpeg and HAS_MOZJPEG else 'disabled'
+    jpegli_status = f'enabled ({CJPEGLI_PATH})' if use_jpegli and HAS_JPEGLI else 'disabled'
     print(f"Input: {input_path} ({input_size:,} bytes / {input_size / 1024 / 1024:.1f} MB)")
     print(f"Settings: target_dpi={target_dpi}, jpeg_quality={jpeg_quality}, "
-          f"mozjpeg={'enabled' if use_mozjpeg and HAS_MOZJPEG else 'disabled'}")
+          f"mozjpeg={mozjpeg_status}, jpegli={jpegli_status}")
     if use_mozjpeg and not HAS_MOZJPEG:
         print(f"  Warning: mozjpeg requested but not installed. "
               f"Install with: pip install mozjpeg-lossless-optimization")
+    if use_jpegli and not HAS_JPEGLI:
+        print(f"  Warning: jpegli requested but cjpegli not found on PATH. "
+              f"Build from: https://github.com/google/jpegli")
     print(f"Pages: {len(pdf.pages)}")
     print()
 
@@ -312,7 +405,7 @@ def compress_pdf(input_path, output_path, target_dpi=150, jpeg_quality=75,
                 original_size = len(obj.read_raw_bytes())
 
                 result = compress_image(obj, target_dpi, jpeg_quality,
-                                        mediabox, use_mozjpeg, stats)
+                                        mediabox, use_mozjpeg, use_jpegli, stats)
 
                 if result and result['changed']:
                     new_size = len(result['data'])
@@ -394,7 +487,10 @@ if __name__ == '__main__':
                         help='JPEG quality 1-100 (default: 75)')
     parser.add_argument('--no-mozjpeg', action='store_true',
                         help='Disable mozjpeg lossless optimization')
+    parser.add_argument('--no-jpegli', action='store_true',
+                        help='Disable jpegli encoder (use Pillow instead)')
 
     args = parser.parse_args()
     compress_pdf(args.input, args.output, args.dpi, args.quality,
-                 use_mozjpeg=not args.no_mozjpeg)
+                 use_mozjpeg=not args.no_mozjpeg,
+                 use_jpegli=not args.no_jpegli)
