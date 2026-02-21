@@ -113,7 +113,7 @@ cmake --install . --prefix /usr/local
 ## Usage
 
 ```bash
-python compress_pdf.py input.pdf output.pdf [--dpi 150] [--quality 75] [--no-mozjpeg] [--no-jpegli]
+python compress-pdf.py input.pdf output.pdf [--dpi 150] [--quality 75] [--no-mozjpeg] [--no-jpegli]
 ```
 
 ### Options
@@ -129,16 +129,16 @@ python compress_pdf.py input.pdf output.pdf [--dpi 150] [--quality 75] [--no-moz
 
 ```bash
 # Default settings — good balance of size and quality
-python compress_pdf.py scan.pdf scan_compressed.pdf
+python compress-pdf.py scan.pdf scan_compressed.pdf
 
 # Aggressive compression — matches smallpdf.com output closely
-python compress_pdf.py scan.pdf scan_small.pdf --dpi 120 --quality 65
+python compress-pdf.py scan.pdf scan_small.pdf --dpi 120 --quality 65
 
 # High quality — for documents where fine print matters
-python compress_pdf.py scan.pdf scan_hq.pdf --dpi 200 --quality 85
+python compress-pdf.py scan.pdf scan_hq.pdf --dpi 200 --quality 85
 
 # Fast mode — skip mozjpeg and jpegli for quicker processing
-python compress_pdf.py scan.pdf scan_fast.pdf --no-mozjpeg --no-jpegli
+python compress-pdf.py scan.pdf scan_fast.pdf --no-mozjpeg --no-jpegli
 ```
 
 ## Verifying Compression Enhancement
@@ -147,13 +147,13 @@ Run these three commands to compare each encoder combination:
 
 ```bash
 # Full pipeline: jpegli + mozjpeg
-python compress_pdf.py original.pdf out_full.pdf --dpi 150 --quality 75
+python compress-pdf.py original.pdf out_full.pdf --dpi 150 --quality 75
 
 # Without jpegli (Pillow + mozjpeg)
-python compress_pdf.py original.pdf out_no_jpegli.pdf --dpi 150 --quality 75 --no-jpegli
+python compress-pdf.py original.pdf out_no_jpegli.pdf --dpi 150 --quality 75 --no-jpegli
 
 # Baseline (Pillow only, no optimizations)
-python compress_pdf.py original.pdf out_baseline.pdf --dpi 150 --quality 75 --no-jpegli --no-mozjpeg
+python compress-pdf.py original.pdf out_baseline.pdf --dpi 150 --quality 75 --no-jpegli --no-mozjpeg
 ```
 
 The profiling output labels each image with its encoder (`downsample(jpegli)` vs `downsample(pillow)`) and shows per-stage byte savings, so the impact of each tool is immediately visible.

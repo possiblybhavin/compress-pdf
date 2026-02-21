@@ -14,7 +14,7 @@ used by services like smallpdf.com:
 7. CLEANUP unreferenced objects and recompress all streams
 
 Usage:
-    python compress_pdf.py input.pdf output.pdf [--dpi 150] [--quality 75] [--no-mozjpeg]
+    python compress-pdf.py input.pdf output.pdf [--dpi 150] [--quality 75] [--no-mozjpeg]
 """
 
 import pikepdf
